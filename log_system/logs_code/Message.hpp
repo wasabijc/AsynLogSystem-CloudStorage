@@ -42,6 +42,6 @@ namespace mylog
     std::string name_;      // 日志器名
     std::string payload_;   // 信息体
     std::thread::id tid_;   // 线程id
-    LogLevel::value level_; // 等级
+    LogLevel::value level_; // 日志级别
   };
 } // namespace mylog

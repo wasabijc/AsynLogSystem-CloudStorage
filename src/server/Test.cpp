@@ -1,8 +1,3 @@
-/* ************************************************************************
-> File Name:     test.cpp
-> Created Time:  Thu 07 Sep 2023 06:37:16 PM CST
-> Description:
- ************************************************************************/
 #define DEBUG_LOG
 #include "Service.hpp"
 #include <thread>

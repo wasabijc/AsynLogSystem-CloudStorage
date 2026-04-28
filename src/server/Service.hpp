@@ -337,13 +337,13 @@ namespace storage
             if (fu.Exists() == false && info.storage_path_.find("deep_storage") != std::string::npos)
             {
                 // 如果是压缩文件，且解压失败，是服务端的错误
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 500 - UnCompress failed");
+                mylog::GetLogger("asynclogger")->Error("evhttp_send_reply: 500 - UnCompress failed");
                 evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
             }
             else if (fu.Exists() == false && info.storage_path_.find("low_storage") == std::string::npos)
             {
                 // 如果是普通文件，且文件不存在，是客户端的错误
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 400 - bad request,file not exists");
+                mylog::GetLogger("asynclogger")->Error("evhttp_send_reply: 400 - bad request,file not exists");
                 evhttp_send_reply(req, HTTP_BADREQUEST, "file not exists", NULL);
             }
 

@@ -6,11 +6,11 @@ namespace storage
 {
     // 用作初始化存储文件的属性信息
     typedef struct StorageInfo{                   
-        time_t mtime_;
-        time_t atime_;
-        size_t fsize_;
-        std::string storage_path_; // 文件存储路径
-        std::string url_;          // 请求URL中的资源路径
+        time_t mtime_;              // 文件最后修改时间
+        time_t atime_;              // 文件最后访问时间
+        size_t fsize_;              // 文件大小
+        std::string storage_path_;  // 文件存储路径
+        std::string url_;           // 请求URL中的资源路径
 
         bool NewStorageInfo(const std::string &storage_path)
         {
@@ -39,10 +39,10 @@ namespace storage
     class DataManager
     {
     private:
-        std::string storage_file_;
-        pthread_rwlock_t rwlock_;
-        std::unordered_map<std::string, StorageInfo> table_;
-        bool need_persist_;
+        std::string storage_file_;                              // 存储文件信息的文件路径
+        pthread_rwlock_t rwlock_;                               // 读写锁，保护table_的并发访问
+        std::unordered_map<std::string, StorageInfo> table_;    // 存储文件信息的哈希表，key是URL，value是文件元数据
+        bool need_persist_;                                     // 标志位，控制是否需要持久化存储，构造函数中先设置为false，等从文件加载完数据后再设置为true，这样在加载数据时就不会调用Storage()函数进行持久化存储
 
     public:
         DataManager()
