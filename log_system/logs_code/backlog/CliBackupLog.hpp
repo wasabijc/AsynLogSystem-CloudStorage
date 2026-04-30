@@ -13,7 +13,7 @@
 extern mylog::Util::JsonData *g_conf_data;
 void start_backup(const std::string &message)
 {
-    // 1. create socket
+    // 1. 创建socket
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0)
     {
@@ -27,6 +27,7 @@ void start_backup(const std::string &message)
     server.sin_port = htons(g_conf_data->backup_port);
     inet_aton(g_conf_data->backup_addr.c_str(), &(server.sin_addr));
 
+    // 2.异常重连
     int cnt = 5;
     while (-1 == connect(sock, (struct sockaddr *)&server, sizeof(server)))
     {

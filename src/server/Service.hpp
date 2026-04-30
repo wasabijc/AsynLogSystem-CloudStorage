@@ -34,7 +34,7 @@ namespace storage
         }
         bool RunModule()
         {
-            // 初始化环境
+            // 初始化环境，创建event_base事件循环
             event_base *base = event_base_new();
             if (base == NULL)
             {
@@ -63,7 +63,7 @@ namespace storage
 #ifdef DEBUG_LOG
                 mylog::GetLogger("asynclogger")->Debug("event_base_dispatch");
 #endif
-                if (-1 == event_base_dispatch(base))
+                if (-1 == event_base_dispatch(base))// 启动事件循环，监听请求
                 {
                     mylog::GetLogger("asynclogger")->Debug("event_base_dispatch err");
                 }
@@ -88,21 +88,22 @@ namespace storage
             mylog::GetLogger("asynclogger")->Info("get req, uri: %s", path.c_str());
 
             // 根据请求中的内容判断是什么请求
-            // 这里是下载请求
+            // 下载请求
             if (path.find("/download/") != std::string::npos)
             {
                 Download(req, arg);
             }
-            // 这里是上传
+            // 上传请求
             else if (path == "/upload")
             {
                 Upload(req, arg);
             }
-            // 这里就是显示已存储文件列表，返回一个html页面给浏览器
+            // 显示已存储文件列表，返回一个html页面给浏览器
             else if (path == "/")
             {
                 ListShow(req, arg);
             }
+            // 其他请求返回404
             else
             {
                 evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", NULL);
@@ -118,7 +119,7 @@ namespace storage
             struct evbuffer *buf = evhttp_request_get_input_buffer(req);
             if (buf == nullptr)
             {
-                mylog::GetLogger("asynclogger")->Info("evhttp_request_get_input_buffer is empty");
+                mylog::GetLogger("asynclogger")->Error("evhttp_request_get_input_buffer is empty");
                 return;
             }
 
@@ -127,10 +128,11 @@ namespace storage
             if (0 == len)
             {
                 evhttp_send_reply(req, HTTP_BADREQUEST, "file empty", NULL);
-                mylog::GetLogger("asynclogger")->Info("request body is empty");
+                mylog::GetLogger("asynclogger")->Error  ("request body is empty");
                 return;
             }
             std::string content(len, 0);
+            // 从请求体中读取内容到content字符串中
             if (-1 == evbuffer_copyout(buf, (void *)content.c_str(), len))
             {
                 mylog::GetLogger("asynclogger")->Error("evbuffer_copyout error");
@@ -139,12 +141,24 @@ namespace storage
             }
 
             // 获取文件名
-            std::string filename = evhttp_find_header(req->input_headers, "FileName");
+            const char* raw_filename = evhttp_find_header(req->input_headers, "FileName");
+            if (raw_filename == nullptr) {
+                mylog::GetLogger("asynclogger")->Error("Missing FileName header");
+                evhttp_send_reply(req, HTTP_BADREQUEST, "Missing FileName header", NULL);
+                return;
+            }
+            std::string filename = raw_filename;
             // 解码文件名
             filename = base64_decode(filename);
 
             // 获取存储类型，客户端自定义请求头 StorageType
-            std::string storage_type = evhttp_find_header(req->input_headers, "StorageType");
+            const char* storage_typeptr = evhttp_find_header(req->input_headers, "StorageType");
+            if (storage_typeptr == nullptr) {
+                mylog::GetLogger("asynclogger")->Error("Missing File StorageType");
+                evhttp_send_reply(req, HTTP_BADREQUEST, "Missing File StorageType", NULL);
+                return;
+            }
+            std::string storage_type = storage_typeptr;
             // 组织存储路径
             std::string storage_path;
             if (storage_type == "low")
@@ -157,7 +171,7 @@ namespace storage
             }
             else
             {
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: HTTP_BADREQUEST");
+                mylog::GetLogger("asynclogger")->Error("evhttp_send_reply: HTTP_BADREQUEST");
                 evhttp_send_reply(req, HTTP_BADREQUEST, "Illegal storage type", NULL);
                 return;
             }
