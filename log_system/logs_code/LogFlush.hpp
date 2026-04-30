@@ -120,9 +120,9 @@ namespace mylog{
             filename += std::to_string(t.tm_year + 1900);
             filename += std::to_string(t.tm_mon + 1);
             filename += std::to_string(t.tm_mday);
-            filename += std::to_string(t.tm_hour + 1);
-            filename += std::to_string(t.tm_min + 1);
-            filename += std::to_string(t.tm_sec + 1) + '-' +
+            filename += std::to_string(t.tm_hour);
+            filename += std::to_string(t.tm_min);
+            filename += std::to_string(t.tm_sec) + '-' +
                         std::to_string(cnt_++) + ".log";
             return filename;
         }
