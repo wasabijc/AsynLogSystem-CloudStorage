@@ -73,7 +73,7 @@ namespace storage
             auto ret = stat(filename_.c_str(), &s);
             if (ret == -1)
             {
-                mylog::GetLogger("asynclogger")->Info("%s, Get file size failed: %s", filename_.c_str(),strerror(errno));
+                mylog::GetLogger("asynclogger")->Error("%s, Get file size failed: %s", filename_.c_str(),strerror(errno));
                 return -1;
             }
             return s.st_size;
@@ -85,7 +85,7 @@ namespace storage
             auto ret = stat(filename_.c_str(), &s);
             if (ret == -1)
             {
-                mylog::GetLogger("asynclogger")->Info("%s, Get file access time failed: %s", filename_.c_str(),strerror(errno));
+                mylog::GetLogger("asynclogger")->Error("%s, Get file access time failed: %s", filename_.c_str(),strerror(errno));
                 return -1;
             }
             return s.st_atime;
@@ -98,7 +98,7 @@ namespace storage
             auto ret = stat(filename_.c_str(), &s);
             if (ret == -1)
             {
-                mylog::GetLogger("asynclogger")->Info("%s, Get file modify time failed: %s",filename_.c_str(), strerror(errno));
+                mylog::GetLogger("asynclogger")->Error("%s, Get file modify time failed: %s",filename_.c_str(), strerror(errno));
                 return -1;
             }
             return s.st_mtime;
@@ -119,7 +119,7 @@ namespace storage
             // 判断要求数据内容是否符合文件大小
             if (pos + len > FileSize())
             {
-                mylog::GetLogger("asynclogger")->Info("needed data larger than file size");
+                mylog::GetLogger("asynclogger")->Error("needed data larger than file size");
                 return false;
             }
 
@@ -128,7 +128,7 @@ namespace storage
             ifs.open(filename_.c_str(), std::ios::binary);
             if (ifs.is_open() == false)
             {
-                mylog::GetLogger("asynclogger")->Info("%s,file open error",filename_.c_str());
+                mylog::GetLogger("asynclogger")->Error("%s,file open error",filename_.c_str());
                 return false;
             }
 
@@ -138,7 +138,7 @@ namespace storage
             ifs.read(&(*content)[0], len);
             if (!ifs.good())
             {
-                mylog::GetLogger("asynclogger")->Info("%s,read file content error",filename_.c_str());
+                mylog::GetLogger("asynclogger")->Error("%s,read file content error",filename_.c_str());
                 ifs.close();
                 return false;
             }
@@ -160,13 +160,13 @@ namespace storage
             ofs.open(filename_.c_str(), std::ios::binary);
             if (!ofs.is_open())
             {
-                mylog::GetLogger("asynclogger")->Info("%s open error: %s", filename_.c_str(), strerror(errno));
+                mylog::GetLogger("asynclogger")->Error("%s open error: %s", filename_.c_str(), strerror(errno));
                 return false;
             }
             ofs.write(content, len);
             if (!ofs.good())
             {
-                mylog::GetLogger("asynclogger")->Info("%s, file set content error",filename_.c_str());
+                mylog::GetLogger("asynclogger")->Error("%s, file set content error",filename_.c_str());
                 ofs.close();
             }
             ofs.close();
@@ -182,14 +182,14 @@ namespace storage
             std::string packed = bundle::pack(format, content);
             if (packed.size() == 0)
             {
-                mylog::GetLogger("asynclogger")->Info("Compress packed size error:%d", packed.size());
+                mylog::GetLogger("asynclogger")->Error("Compress packed size error:%d", packed.size());
                 return false;
             }
             // 将压缩的数据写入压缩包文件中
             FileUtil f(filename_);
             if (f.SetContent(packed.c_str(), packed.size()) == false)
             {
-                mylog::GetLogger("asynclogger")->Info("filename:%s, Compress SetContent error",filename_.c_str());
+                mylog::GetLogger("asynclogger")->Error("filename:%s, Compress SetContent error",filename_.c_str());
                 return false;
             }
             return true;
@@ -200,7 +200,7 @@ namespace storage
             std::string body;
             if (this->GetContent(&body) == false)
             {
-                mylog::GetLogger("asynclogger")->Info("filename:%s, uncompress get file content failed!",filename_.c_str());
+                mylog::GetLogger("asynclogger")->Error("filename:%s, uncompress get file content failed!",filename_.c_str());
                 return false;
             }
             // 对压缩的数据进行解压缩
@@ -209,7 +209,7 @@ namespace storage
             FileUtil fu(download_path);
             if (fu.SetContent(unpacked.c_str(), unpacked.size()) == false)
             {
-                mylog::GetLogger("asynclogger")->Info("filename:%s, uncompress write packed data failed!",filename_.c_str());
+                mylog::GetLogger("asynclogger")->Error("filename:%s, uncompress write packed data failed!",filename_.c_str());
                 return false;
             }
             return true;
@@ -254,7 +254,7 @@ namespace storage
             std::stringstream ss;
             if (usw->write(val, &ss) != 0)
             {
-                mylog::GetLogger("asynclogger")->Info("serialize error");
+                mylog::GetLogger("asynclogger")->Error("serialize error");
                 return false;
             }
             *str = ss.str();
@@ -268,7 +268,7 @@ namespace storage
             std::string err;
             if (ucr->parse(str.c_str(), str.c_str() + str.size(), val, &err) == false)
             {
-                mylog::GetLogger("asynclogger")->Info("parse error");
+                mylog::GetLogger("asynclogger")->Error("parse error");
                 return false;
             }
             return false;
