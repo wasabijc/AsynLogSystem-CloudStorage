@@ -410,17 +410,6 @@ namespace storage
             evhttp_send_reply(req, HTTP_OK, NULL, NULL);
             mylog::GetLogger("asynclogger")->Info("ListShow() finish");
         }
-        static std::string GetETag(const StorageInfo &info)
-        {
-            // 自定义etag :  filename-fsize-mtime
-            FileUtil fu(info.storage_path_);
-            std::string etag = fu.FileName();
-            etag += "-";
-            etag += std::to_string(info.fsize_);
-            etag += "-";
-            etag += std::to_string(info.mtime_);
-            return etag;
-        }
 
         // 删除指定文件：包括磁盘上的存储文件、内存表与持久化记录
         // URL 形如 /delete/<filename>，filename 已 UrlDecode
@@ -504,71 +493,58 @@ namespace storage
                 fu.UnCompress(download_path); // 将文件解压到low_storage下
             }
             mylog::GetLogger("asynclogger")->Info("request download_path:%s", download_path.c_str());
+
             FileUtil fu(download_path);
             if (fu.Exists() == false && info.storage_path_.find("deep_storage") != std::string::npos)
             {
                 // 如果是压缩文件，且解压失败，是服务端的错误
                 mylog::GetLogger("asynclogger")->Error("evhttp_send_reply: 500 - UnCompress failed");
                 evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
+                return;
             }
             else if (fu.Exists() == false && info.storage_path_.find("low_storage") == std::string::npos)
             {
                 // 如果是普通文件，且文件不存在，是客户端的错误
                 mylog::GetLogger("asynclogger")->Error("evhttp_send_reply: 400 - bad request,file not exists");
                 evhttp_send_reply(req, HTTP_BADREQUEST, "file not exists", NULL);
+                return;
             }
-
-            // 3.确认文件是否需要断点续传
-            bool retrans = false;
-            std::string old_etag;
-            auto if_range = evhttp_find_header(req->input_headers, "If-Range");
-            if (NULL != if_range)
-            {
-                old_etag = if_range;
-                // 有If-Range字段且，这个字段的值与请求文件的最新etag一致则符合断点续传
-                if (old_etag == GetETag(info))
-                {
-                    retrans = true;
-                    mylog::GetLogger("asynclogger")->Info("%s need breakpoint continuous transmission", download_path.c_str());
-                }
-            }
-
-            // 4. 读取文件数据，放入rsp.body中
             if (fu.Exists() == false)
             {
                 mylog::GetLogger("asynclogger")->Error("%s not exists", download_path.c_str());
-                download_path += "not exists";
-                evhttp_send_reply(req, 404, download_path.c_str(), NULL);
+                evhttp_send_reply(req, HTTP_NOTFOUND, "file not exists", NULL);
                 return;
             }
+
+            // 3. 把整个文件挂到响应 evbuffer 上一次性发送（不支持断点续传）
             evbuffer *outbuf = evhttp_request_get_output_buffer(req);
             int fd = open(download_path.c_str(), O_RDONLY);
             if (fd == -1)
             {
-                mylog::GetLogger("asynclogger")->Error("open file error: %s -- %s", download_path.c_str(), strerror(errno));
+                mylog::GetLogger("asynclogger")->Error("open file error: %s -- %s",
+                                                       download_path.c_str(), strerror(errno));
                 evhttp_send_reply(req, HTTP_INTERNAL, strerror(errno), NULL);
+                if (download_path != info.storage_path_) ::remove(download_path.c_str());
                 return;
             }
-            // 5. evbuffer_add_file将文件数据添加到响应体中
             if (-1 == evbuffer_add_file(outbuf, fd, 0, fu.FileSize()))
             {
-                mylog::GetLogger("asynclogger")->Error("evbuffer_add_file: %d -- %s -- %s", fd, download_path.c_str(), strerror(errno));
+                mylog::GetLogger("asynclogger")->Error(
+                    "evbuffer_add_file: %d -- %s -- %s",
+                    fd, download_path.c_str(), strerror(errno));
+                // evbuffer_add_file 失败时 fd 所有权未必转交，兜底关闭，避免泄漏
+                ::close(fd);
+                evhttp_send_reply(req, HTTP_INTERNAL, "send file error", NULL);
+                if (download_path != info.storage_path_) ::remove(download_path.c_str());
+                return;
             }
-            // 6. 设置响应头部字段： ETag， Accept-Ranges: bytes
-            evhttp_add_header(req->output_headers, "Accept-Ranges", "bytes");
-            evhttp_add_header(req->output_headers, "ETag", GetETag(info).c_str());
+
+            // 4. 设置响应头并发送 200
             evhttp_add_header(req->output_headers, "Content-Type", "application/octet-stream");
-            if (retrans == false)
-            {
-                evhttp_send_reply(req, HTTP_OK, "Success", NULL);
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: HTTP_OK");
-            }
-            else
-            {
-                evhttp_send_reply(req, 206, "breakpoint continuous transmission", NULL); // 区间请求响应的是206
-                mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 206");
-            }
-            // 7. 如果是深度存储的文件，且解压后生成了普通文件，则删除解压生成的普通文件
+            evhttp_send_reply(req, HTTP_OK, "Success", NULL);
+            mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: HTTP_OK");
+
+            // 5. 如果是深度存储的文件，且解压后生成了普通文件，则删除解压生成的普通文件
             if (download_path != info.storage_path_)
             {
                 remove(download_path.c_str());
