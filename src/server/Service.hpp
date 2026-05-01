@@ -327,6 +327,7 @@ namespace storage
 
         static void Download(struct evhttp_request *req, void *arg)
         {
+            mylog::GetLogger("asynclogger")->Info("Download start");
             // 1. 获取客户端请求的资源路径path   req.path
             // 2. 根据资源路径，获取StorageInfo
             StorageInfo info;
