@@ -300,7 +300,7 @@ namespace storage
             templateContent = std::regex_replace(templateContent,
                                                  std::regex("\\{\\{FILE_LIST\\}\\}"),
                                                  generateModernFileList(arry));
-            //替换服务器地址进hrml
+            //替换服务器地址进html
             templateContent = std::regex_replace(templateContent,
                                                  std::regex("\\{\\{BACKEND_URL\\}\\}"),
                                                 "http://"+storage::Config::GetInstance()->GetServerIp()+":"+std::to_string(storage::Config::GetInstance()->GetServerPort()));
