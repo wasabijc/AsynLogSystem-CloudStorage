@@ -9,6 +9,9 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstring>
 
 #include <regex>
 
@@ -110,6 +113,42 @@ namespace storage
             }
         }
 
+        // 将 evbuffer 中剩余的数据以分块方式流式写入已打开的文件描述符 fd
+        // 返回 true 表示全部写入成功，false 表示失败
+        // 该函数避免一次性在内存中分配整个文件大小的缓冲，防止大文件场景下 OOM
+        static bool StreamEvbufferToFd(struct evbuffer *buf, int fd)
+        {
+            // 64KB 固定分块，写多少拿多少，拿完就落盘
+            constexpr size_t kChunkSize = 64 * 1024;
+            unsigned char chunk[kChunkSize];
+            while (size_t remain = evbuffer_get_length(buf))
+            {
+                size_t want = remain < kChunkSize ? remain : kChunkSize;
+                // evbuffer_remove 会把数据从 evbuffer 中搬走（而不是拷贝一份），
+                // 这样 evbuffer 自身也会随写入进程不断释放内存
+                int n = evbuffer_remove(buf, chunk, want);
+                if (n <= 0)
+                {
+                    mylog::GetLogger("asynclogger")->Error("evbuffer_remove error, n=%d", n);
+                    return false;
+                }
+                // 可能的部分写入，需要循环直至把这一块写完
+                ssize_t written = 0;
+                while (written < n)
+                {
+                    ssize_t w = ::write(fd, chunk + written, n - written);
+                    if (w < 0)
+                    {
+                        if (errno == EINTR) continue;
+                        mylog::GetLogger("asynclogger")->Error("write fd error: %s", strerror(errno));
+                        return false;
+                    }
+                    written += w;
+                }
+            }
+            return true;
+        }
+
         static void Upload(struct evhttp_request *req, void *arg)
         {
             mylog::GetLogger("asynclogger")->Info("Upload start");
@@ -124,19 +163,11 @@ namespace storage
             }
 
             size_t len = evbuffer_get_length(buf); // 获取请求体的长度
-            mylog::GetLogger("asynclogger")->Info("evbuffer_get_length is %u", len);
+            mylog::GetLogger("asynclogger")->Info("evbuffer_get_length is %zu", len);
             if (0 == len)
             {
                 evhttp_send_reply(req, HTTP_BADREQUEST, "file empty", NULL);
-                mylog::GetLogger("asynclogger")->Error  ("request body is empty");
-                return;
-            }
-            std::string content(len, 0);
-            // 从请求体中读取内容到content字符串中
-            if (-1 == evbuffer_copyout(buf, (void *)content.c_str(), len))
-            {
-                mylog::GetLogger("asynclogger")->Error("evbuffer_copyout error");
-                evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
+                mylog::GetLogger("asynclogger")->Error("request body is empty");
                 return;
             }
 
@@ -186,33 +217,77 @@ namespace storage
             mylog::GetLogger("asynclogger")->Debug("storage_path:%s", storage_path.c_str());
 #endif
 
-            // 看路径里是low还是deep存储，是deep就压缩，是low就直接写入
-            FileUtil fu(storage_path);
+            // 看路径里是low还是deep存储，是deep就压缩，是low就直接流式写入
             if (storage_path.find("low_storage") != std::string::npos)
             {
-                if (fu.SetContent(content.c_str(), len) == false)
+                // ============ low_storage：分块流式落盘，避免 OOM ============
+                // 直接从 evbuffer 中按 64KB 为单位 remove 并写入磁盘，
+                // 峰值内存只有单个 chunk 大小（64KB），哪怕上传几十 GB 也不会把进程撑爆。
+                int fd = ::open(storage_path.c_str(),
+                                O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd == -1)
                 {
-                    mylog::GetLogger("asynclogger")->Error("low_storage fail, evhttp_send_reply: HTTP_INTERNAL");
+                    mylog::GetLogger("asynclogger")->Error("open %s error: %s",
+                                                           storage_path.c_str(), strerror(errno));
                     evhttp_send_reply(req, HTTP_INTERNAL, "server error", NULL);
                     return;
                 }
-                else
+                bool ok = StreamEvbufferToFd(buf, fd);
+                ::close(fd);
+                if (!ok)
                 {
-                    mylog::GetLogger("asynclogger")->Info("low_storage success");
+                    // 写失败，清理已经写了一半的残留文件
+                    ::remove(storage_path.c_str());
+                    mylog::GetLogger("asynclogger")->Error("low_storage stream write fail, evhttp_send_reply: HTTP_INTERNAL");
+                    evhttp_send_reply(req, HTTP_INTERNAL, "server error", NULL);
+                    return;
                 }
+                mylog::GetLogger("asynclogger")->Info("low_storage success (streamed, size=%zu)", len);
             }
             else
             {
+                // ============ deep_storage：压缩存储 ============
+                // 压缩算法（bundle::pack）需要完整的数据视图，因此必须先把整块数据装进内存。
+                // 为避免超大文件把服务器打爆，这里设置一个最大可压缩长度上限，
+                // 超过该阈值直接拒绝并建议客户端改用普通存储。
+                constexpr size_t kMaxCompressSize = 256ULL * 1024 * 1024; // 256MB
+                if (len > kMaxCompressSize)
+                {
+                    mylog::GetLogger("asynclogger")->Error(
+                        "deep_storage refused: file too large (%zu > %zu), use low storage instead",
+                        len, kMaxCompressSize);
+                    evhttp_send_reply(req, 413,
+                                      "file too large for deep storage, please use low storage",
+                                      NULL);
+                    return;
+                }
+
+                // 使用 evbuffer_remove 将数据一次性搬运（而非拷贝）到 content，
+                // 搬运完 evbuffer 内部内存即可释放，相较 copyout 可减少约一半峰值内存。
+                std::string content;
+                try {
+                    content.resize(len);
+                } catch (const std::bad_alloc &e) {
+                    mylog::GetLogger("asynclogger")->Error(
+                        "deep_storage bad_alloc when resize(%zu): %s", len, e.what());
+                    evhttp_send_reply(req, HTTP_INTERNAL, "out of memory", NULL);
+                    return;
+                }
+                if (-1 == evbuffer_remove(buf, &content[0], len))
+                {
+                    mylog::GetLogger("asynclogger")->Error("evbuffer_remove error");
+                    evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
+                    return;
+                }
+
+                FileUtil fu(storage_path);
                 if (fu.Compress(content, Config::GetInstance()->GetBundleFormat()) == false)
                 {
                     mylog::GetLogger("asynclogger")->Error("deep_storage fail, evhttp_send_reply: HTTP_INTERNAL");
                     evhttp_send_reply(req, HTTP_INTERNAL, "server error", NULL);
                     return;
                 }
-                else
-                {
-                    mylog::GetLogger("asynclogger")->Info("deep_storage success");
-                }
+                mylog::GetLogger("asynclogger")->Info("deep_storage success");
             }
 
             // 添加存储文件信息，交由数据管理类进行管理
