@@ -324,6 +324,7 @@ namespace storage
             etag += std::to_string(info.mtime_);
             return etag;
         }
+
         static void Download(struct evhttp_request *req, void *arg)
         {
             // 1. 获取客户端请求的资源路径path   req.path
@@ -335,7 +336,7 @@ namespace storage
             mylog::GetLogger("asynclogger")->Info("request resource_path:%s", resource_path.c_str());
 
             std::string download_path = info.storage_path_;
-            // 2.如果压缩过了就解压到新文件给用户下载
+            // 2.如果是深度存储的文件就先解压再给用户下载
             if (info.storage_path_.find(Config::GetInstance()->GetLowStorageDir()) == std::string::npos)
             {
                 mylog::GetLogger("asynclogger")->Info("uncompressing:%s", info.storage_path_.c_str());
@@ -344,7 +345,7 @@ namespace storage
                                 std::string(download_path.begin() + download_path.find_last_of('/') + 1, download_path.end());
                 FileUtil dirCreate(Config::GetInstance()->GetLowStorageDir());
                 dirCreate.CreateDirectory();
-                fu.UnCompress(download_path); // 将文件解压到low_storage下去或者再创一个文件夹做中转
+                fu.UnCompress(download_path); // 将文件解压到low_storage下
             }
             mylog::GetLogger("asynclogger")->Info("request download_path:%s", download_path.c_str());
             FileUtil fu(download_path);
@@ -379,7 +380,7 @@ namespace storage
             // 4. 读取文件数据，放入rsp.body中
             if (fu.Exists() == false)
             {
-                mylog::GetLogger("asynclogger")->Info("%s not exists", download_path.c_str());
+                mylog::GetLogger("asynclogger")->Error("%s not exists", download_path.c_str());
                 download_path += "not exists";
                 evhttp_send_reply(req, 404, download_path.c_str(), NULL);
                 return;
@@ -392,12 +393,12 @@ namespace storage
                 evhttp_send_reply(req, HTTP_INTERNAL, strerror(errno), NULL);
                 return;
             }
-            // 和前面用的evbuffer_add类似，但是效率更高，具体原因可以看函数声明
+            // 5. evbuffer_add_file将文件数据添加到响应体中
             if (-1 == evbuffer_add_file(outbuf, fd, 0, fu.FileSize()))
             {
                 mylog::GetLogger("asynclogger")->Error("evbuffer_add_file: %d -- %s -- %s", fd, download_path.c_str(), strerror(errno));
             }
-            // 5. 设置响应头部字段： ETag， Accept-Ranges: bytes
+            // 6. 设置响应头部字段： ETag， Accept-Ranges: bytes
             evhttp_add_header(req->output_headers, "Accept-Ranges", "bytes");
             evhttp_add_header(req->output_headers, "ETag", GetETag(info).c_str());
             evhttp_add_header(req->output_headers, "Content-Type", "application/octet-stream");
@@ -411,9 +412,10 @@ namespace storage
                 evhttp_send_reply(req, 206, "breakpoint continuous transmission", NULL); // 区间请求响应的是206
                 mylog::GetLogger("asynclogger")->Info("evhttp_send_reply: 206");
             }
+            // 7. 如果是深度存储的文件，且解压后生成了普通文件，则删除解压生成的普通文件
             if (download_path != info.storage_path_)
             {
-                remove(download_path.c_str()); // 删除文件
+                remove(download_path.c_str());
             }
         }
     };
