@@ -27,7 +27,7 @@ namespace storage
                 mylog::GetLogger("asynclogger")->Fatal("ReadConfig failed");
                 return;
             }
-            mylog::GetLogger("asynclogger")->Info("ReadConfig complicate");
+            mylog::GetLogger("asynclogger")->Info("ReadConfig complete");
         }
 
     public:

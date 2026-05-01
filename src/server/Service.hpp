@@ -14,6 +14,7 @@
 #include <cstring>
 
 #include <regex>
+#include <algorithm>
 
 #include "base64.h" // 来自 cpp-base64 库
 
@@ -363,6 +364,12 @@ namespace storage
             // 1. 获取所有的文件存储信息
             std::vector<StorageInfo> arry;
             data_->GetAll(&arry);
+
+            // 按最后修改时间降序排序，使最新上传/修改的文件显示在最上方
+            std::sort(arry.begin(), arry.end(),
+                      [](const StorageInfo &a, const StorageInfo &b) {
+                          return a.mtime_ > b.mtime_;
+                      });
 
             // 读取模板文件
             std::ifstream templateFile("index.html");
