@@ -102,6 +102,11 @@ namespace storage
             {
                 Upload(req, arg);
             }
+            // 删除请求 /delete/<filename>
+            else if (path.find("/delete/") != std::string::npos)
+            {
+                Delete(req, arg);
+            }
             // 显示已存储文件列表，返回一个html页面给浏览器
             else if (path == "/")
             {
@@ -324,6 +329,12 @@ namespace storage
                     storage_type = "deep";
                 }
 
+                // 使用 base64 编码 filename，避免 HTML / JS 字符串拼接中出现单双引号、
+                // 反斜杠等需要转义的字符；前端在调用 deleteFile 时再 atob 还原。
+                std::string filename_b64 = base64_encode(
+                    reinterpret_cast<const unsigned char *>(filename.data()),
+                    filename.size());
+
                 ss << "<div class='file-item'>"
                    << "<div class='file-info'>"
                    << "<span>📄" << filename << "</span>"
@@ -333,7 +344,11 @@ namespace storage
                    << "<span>" << formatSize(file.fsize_) << "</span>"
                    << "<span>" << TimetoStr(file.mtime_) << "</span>"
                    << "</div>"
+                   << "<div class='file-actions'>"
                    << "<button onclick=\"window.location='" << file.url_ << "'\">⬇️ 下载</button>"
+                   << "<button class='btn-danger' onclick=\"deleteFile('"
+                   << filename_b64 << "')\">🗑️ 删除</button>"
+                   << "</div>"
                    << "</div>";
             }
 
@@ -405,6 +420,64 @@ namespace storage
             etag += "-";
             etag += std::to_string(info.mtime_);
             return etag;
+        }
+
+        // 删除指定文件：包括磁盘上的存储文件、内存表与持久化记录
+        // URL 形如 /delete/<filename>，filename 已 UrlDecode
+        static void Delete(struct evhttp_request *req, void *arg)
+        {
+            mylog::GetLogger("asynclogger")->Info("Delete start");
+
+            std::string path = evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req));
+            path = UrlDecode(path);
+
+            // 解析出文件名： /delete/xxx -> xxx
+            const std::string prefix = "/delete/";
+            auto pos = path.find(prefix);
+            if (pos == std::string::npos || pos + prefix.size() >= path.size())
+            {
+                mylog::GetLogger("asynclogger")->Error("Delete: bad path:%s", path.c_str());
+                evhttp_send_reply(req, HTTP_BADREQUEST, "bad delete path", NULL);
+                return;
+            }
+            std::string filename = path.substr(pos + prefix.size());
+
+            // 拼出 DataManager 中使用的 url_：download_prefix + filename
+            std::string url_key = Config::GetInstance()->GetDownloadPrefix() + filename;
+
+            // 1. 先取出 StorageInfo 拿到磁盘存储路径
+            StorageInfo info;
+            if (!data_->GetOneByURL(url_key, &info))
+            {
+                mylog::GetLogger("asynclogger")->Error("Delete: file info not found, url:%s", url_key.c_str());
+                evhttp_send_reply(req, HTTP_NOTFOUND, "file not found", NULL);
+                return;
+            }
+
+            // 2. 从 DataManager 删除（内存表 + 持久化）
+            if (!data_->Delete(url_key))
+            {
+                mylog::GetLogger("asynclogger")->Error("Delete: data_->Delete failed, url:%s", url_key.c_str());
+                evhttp_send_reply(req, HTTP_INTERNAL, "delete record failed", NULL);
+                return;
+            }
+
+            // 3. 删除磁盘上的实际文件（深度存储压缩包或普通文件）
+            //    即使磁盘删除失败，索引已被清除，也保证列表与磁盘一致；这里仅打日志
+            if (::remove(info.storage_path_.c_str()) != 0)
+            {
+                mylog::GetLogger("asynclogger")->Warn(
+                    "Delete: remove storage file failed: %s, errno:%s",
+                    info.storage_path_.c_str(), strerror(errno));
+            }
+            else
+            {
+                mylog::GetLogger("asynclogger")->Info(
+                    "Delete: remove storage file ok: %s", info.storage_path_.c_str());
+            }
+
+            evhttp_send_reply(req, HTTP_OK, "Success", NULL);
+            mylog::GetLogger("asynclogger")->Info("Delete finish:success");
         }
 
         static void Download(struct evhttp_request *req, void *arg)

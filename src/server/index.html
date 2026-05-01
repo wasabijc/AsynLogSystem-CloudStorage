@@ -334,6 +334,21 @@
             font-size: 13px;
         }
 
+        .file-actions {
+            display: flex;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        .file-actions button.btn-danger {
+            background: linear-gradient(90deg, #ef4444, #f97316);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+        }
+
+        .file-actions button.btn-danger:hover:not(:disabled) {
+            box-shadow: 0 6px 16px rgba(239, 68, 68, 0.35);
+        }
+
         /* Toast 提示 */
         .toast {
             position: fixed;
@@ -577,6 +592,41 @@
 
         function downloadFile(fileId) {
             window.location = `${config.backendUrl}/download?id=${fileId}`;
+        }
+
+        // 删除文件：filenameB64 由后端 base64 编码后注入到 onclick，避免特殊字符转义问题
+        async function deleteFile(filenameB64) {
+            let filename = '';
+            try {
+                // atob 解 base64，再用 TextDecoder 还原 UTF-8（兼容中文文件名）
+                const bin = atob(filenameB64);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                filename = new TextDecoder('utf-8').decode(bytes);
+            } catch (e) {
+                showToast('文件名解析失败', 'error');
+                return;
+            }
+
+            if (!confirm(`确定要删除文件「${filename}」吗？此操作不可恢复。`)) {
+                return;
+            }
+
+            try {
+                const resp = await fetch(
+                    `${config.backendUrl}/delete/${encodeURIComponent(filename)}`,
+                    { method: 'GET' }
+                );
+                if (resp.ok) {
+                    showToast('删除成功', 'success');
+                    setTimeout(() => location.reload(), 600);
+                } else {
+                    const text = await resp.text().catch(() => '');
+                    showToast(`删除失败: ${resp.status} ${text}`, 'error');
+                }
+            } catch (err) {
+                showToast('网络错误，删除失败', 'error');
+            }
         }
     </script>
 </body>
