@@ -3,6 +3,7 @@
 *.so
 *.a
 test
+gdb_test
 client_test
 backup_server
 a.out
