@@ -654,6 +654,7 @@ namespace storage
             {
                 remove(download_path.c_str());
             }
+            mylog::GetLogger("asynclogger")->Info("Download finish:success");
         }
     };
 }

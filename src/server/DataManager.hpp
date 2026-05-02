@@ -166,10 +166,16 @@ namespace storage
             pthread_rwlock_unlock(&rwlock_);
             if (need_persist_ == true && Storage() == false)
             {
-                mylog::GetLogger("asynclogger")->Error("data_message Insert:Storage Error");
+                mylog::GetLogger("asynclogger")->Error(
+                    "data_message Insert:Storage Error, url:%s, storage_path:%s, fsize:%zu",
+                    info.url_.c_str(), info.storage_path_.c_str(),
+                    (size_t)info.fsize_);
                 return false;
             }
-            mylog::GetLogger("asynclogger")->Info("data_message Insert end");
+            mylog::GetLogger("asynclogger")->Info(
+                "data_message Insert end, url:%s, storage_path:%s, fsize:%zu, mtime:%ld, atime:%ld",
+                info.url_.c_str(), info.storage_path_.c_str(),
+                (size_t)info.fsize_, (long)info.mtime_, (long)info.atime_);
             return true;
         }
 

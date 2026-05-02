@@ -21,8 +21,8 @@ void log_system_module_init()
     Glb->BuildLoggerName("asynclogger");
     Glb->BuildLoggerFlush<mylog::RollFileFlush>("./logfile/RollFile_log",
                                               1024 * 1024);
-    // The LoggerManger has been built and is managed by members of the LoggerManger class
-    //The logger is assigned to the managed object, and the caller lands the log by invoking the singleton managed object
+    // LoggerManager 已构建完成，并由 LoggerManager 类的成员进行管理
+    // 将 logger 交给托管对象，调用方通过调用单例托管对象来完成日志落地
     mylog::LoggerManager::GetInstance().AddLogger(Glb->Build());
 }
 int main()
