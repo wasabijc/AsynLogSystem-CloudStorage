@@ -68,7 +68,15 @@ namespace storage
         }
         ~DataManager()
         {
+            // 关闭流程日志埋点：记录当前管理的文件条目数，便于对账
+            size_t entry_count = 0;
+            // 这里不加读锁——析构时应保证外部已无并发访问；取个大致数量即可
+            entry_count = table_.size();
+            mylog::GetLogger("asynclogger")->Info(
+                "DataManager destruct start, current entries:%zu, storage_file:%s",
+                entry_count, storage_file_.c_str());
             pthread_rwlock_destroy(&rwlock_);
+            mylog::GetLogger("asynclogger")->Info("DataManager destruct end");
         }
 
         bool InitLoad() // 初始化程序运行时从文件读取数据

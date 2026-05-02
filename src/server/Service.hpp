@@ -45,6 +45,9 @@ namespace storage
                 mylog::GetLogger("asynclogger")->Fatal("event_base_new err!");
                 return false;
             }
+            // 保存到成员，便于外部（如信号处理函数）调用 Stop() 进行平滑关闭
+            base_ = base;
+
             // 设置监听的端口和地址
             sockaddr_in sin;
             memset(&sin, 0, sizeof(sin));
@@ -72,17 +75,55 @@ namespace storage
                     mylog::GetLogger("asynclogger")->Debug("event_base_dispatch err");
                 }
             }
-            if (base)
-                event_base_free(base);
+
+            // ===== 关闭流程日志埋点 =====
+            // 事件循环退出（可能是 Stop() 触发，也可能是 dispatch 内部异常退出），
+            // 依次释放 evhttp 句柄和 event_base，并打印每一步日志以便运维/排障。
+            mylog::GetLogger("asynclogger")->Info("Service shutdown start: event loop exited");
             if (httpd)
+            {
                 evhttp_free(httpd);
+                mylog::GetLogger("asynclogger")->Info("Service shutdown: evhttp_free done");
+            }
+            if (base)
+            {
+                event_base_free(base);
+                mylog::GetLogger("asynclogger")->Info("Service shutdown: event_base_free done");
+            }
+            base_ = nullptr;
+            mylog::GetLogger("asynclogger")->Info("Service shutdown finish: RunModule return");
             return true;
+        }
+
+        // 供外部（信号处理函数等）调用，平滑退出事件循环
+        // 注意：event_base_loopexit 是线程/信号安全的，可在信号处理里调用
+        void Stop()
+        {
+            mylog::GetLogger("asynclogger")->Info("Service::Stop called, try to exit event loop");
+            if (base_ != nullptr)
+            {
+                // 立刻让 dispatch 返回
+                if (event_base_loopexit(base_, nullptr) != 0)
+                {
+                    mylog::GetLogger("asynclogger")->Error("event_base_loopexit failed");
+                }
+                else
+                {
+                    mylog::GetLogger("asynclogger")->Info("event_base_loopexit scheduled");
+                }
+            }
+            else
+            {
+                mylog::GetLogger("asynclogger")->Warn("Service::Stop: event_base already null, ignore");
+            }
         }
 
     private:
         uint16_t server_port_;
         std::string server_ip_;
         std::string download_prefix_;
+        // 当前正在运行的 event_base，RunModule 期间有效；Stop() 通过它请求退出事件循环。
+        event_base *base_ = nullptr;
 
     private:
         static void GenHandler(struct evhttp_request *req, void *arg)
