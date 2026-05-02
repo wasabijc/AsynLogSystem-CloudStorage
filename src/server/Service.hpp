@@ -6,12 +6,14 @@
 // for http
 #include <evhttp.h>
 #include <event2/http.h>
+#include <event2/event.h>
 
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <csignal>
 
 #include <regex>
 #include <algorithm>
@@ -65,6 +67,29 @@ namespace storage
             // 指定generic callback，也可以为特定的URI指定callback
             evhttp_set_gencb(httpd, GenHandler, NULL);
 
+            // ===== 注册 libevent 原生信号事件（SIGINT / SIGTERM） =====
+            // 背景：之前使用 std::signal 注册信号处理函数，在 Linux + glibc 下
+            // 默认带 SA_RESTART，导致信号到达时 epoll_wait 被自动重启，
+            // event_base_loopexit 设置的退出标志/超时定时器要等到下一次 IO
+            // 事件（比如用户刷新页面）才会被检查——现象就是"Ctrl+C 后需要
+            // 主动刷新网页才退出"。
+            //
+            // libevent 自带的 evsignal_new 使用内部 pipe/signalfd 把信号转成
+            // 事件循环中的正常事件，不依赖被中断的系统调用，因此一按下 Ctrl+C
+            // 就能立刻唤醒 dispatch。
+            struct event *sigint_ev  = evsignal_new(base, SIGINT,  OnSignal, this);
+            struct event *sigterm_ev = evsignal_new(base, SIGTERM, OnSignal, this);
+            if (sigint_ev == nullptr || sigterm_ev == nullptr ||
+                event_add(sigint_ev,  nullptr) != 0 ||
+                event_add(sigterm_ev, nullptr) != 0)
+            {
+                mylog::GetLogger("asynclogger")->Error("register signal event failed");
+            }
+            else
+            {
+                mylog::GetLogger("asynclogger")->Info("signal events registered on event_base (SIGINT/SIGTERM)");
+            }
+
             if (base)
             {
 #ifdef DEBUG_LOG
@@ -80,6 +105,11 @@ namespace storage
             // 事件循环退出（可能是 Stop() 触发，也可能是 dispatch 内部异常退出），
             // 依次释放 evhttp 句柄和 event_base，并打印每一步日志以便运维/排障。
             mylog::GetLogger("asynclogger")->Info("Service shutdown start: event loop exited");
+
+            // 先释放信号事件对象，避免 event_base_free 释放它们时产生警告
+            if (sigint_ev)  event_free(sigint_ev);
+            if (sigterm_ev) event_free(sigterm_ev);
+
             if (httpd)
             {
                 evhttp_free(httpd);
@@ -95,26 +125,44 @@ namespace storage
             return true;
         }
 
-        // 供外部（信号处理函数等）调用，平滑退出事件循环
-        // 注意：event_base_loopexit 是线程/信号安全的，可在信号处理里调用
+        // 供外部调用（非信号上下文），平滑退出事件循环
+        // event_base_loopexit 自身是线程安全的，传 1s 超时作为兜底保护，
+        // 即便 event_base 里没有任何 IO/信号事件也最晚 1 秒后返回。
         void Stop()
         {
             mylog::GetLogger("asynclogger")->Info("Service::Stop called, try to exit event loop");
             if (base_ != nullptr)
             {
-                // 立刻让 dispatch 返回
-                if (event_base_loopexit(base_, nullptr) != 0)
+                struct timeval tv {1, 0};
+                if (event_base_loopexit(base_, &tv) != 0)
                 {
                     mylog::GetLogger("asynclogger")->Error("event_base_loopexit failed");
                 }
                 else
                 {
-                    mylog::GetLogger("asynclogger")->Info("event_base_loopexit scheduled");
+                    mylog::GetLogger("asynclogger")->Info("event_base_loopexit scheduled (timeout=1s)");
                 }
             }
             else
             {
                 mylog::GetLogger("asynclogger")->Warn("Service::Stop: event_base already null, ignore");
+            }
+        }
+
+    private:
+    private:
+        // libevent 原生信号事件回调。此回调运行在事件循环线程的"正常代码路径"中，
+        // **不是** 真正的信号处理上下文——libevent 把信号转成 pipe 上的可读事件后
+        // 在 dispatch 里分发到这里。因此这里可以安全地调用日志接口、new/delete 等。
+        static void OnSignal(evutil_socket_t sig, short /*events*/, void *arg)
+        {
+            auto *self = static_cast<Service *>(arg);
+            mylog::GetLogger("asynclogger")->Info(
+                "Shutdown signal received via libevent: %d, start graceful shutdown",
+                (int)sig);
+            if (self != nullptr)
+            {
+                self->Stop();
             }
         }
 
