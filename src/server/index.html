@@ -511,7 +511,7 @@
         });
 
         // ===== 上传（使用 XHR 以获得进度事件）=====
-        function uploadFile() {
+        async function uploadFile() {
             const storageType = document.querySelector('input[name="storageType"]:checked').value;
             const file = fileInput.files[0];
 
@@ -522,10 +522,41 @@
 
             const encodedFilename = btoa(unescape(encodeURIComponent(file.name)));
 
+            // ---- 上传前预检：同类型 -> 弹窗确认替换；不同类型 -> 提示可共存 ----
+            let overwrite = false;
+            try {
+                const checkUrl = `${config.backendUrl}/exists?name=${encodeURIComponent(encodedFilename)}&type=${storageType}`;
+                const resp = await fetch(checkUrl, { method: 'GET' });
+                if (resp.ok) {
+                    const info = await resp.json();
+                    if (info.same_type_exists) {
+                        // 相同存储类型已存在同名文件：弹窗提示是否替换
+                        const ok = confirm(
+                            `「${file.name}」在当前存储类型（${storageType === 'deep' ? '深度存储' : '普通存储'}）下已存在。\n\n` +
+                            `点击「确定」将替换原有文件；点击「取消」放弃本次上传。`
+                        );
+                        if (!ok) {
+                            showToast('已取消上传', 'info');
+                            return;
+                        }
+                        overwrite = true;
+                    } else if (info.other_type_exists) {
+                        // 不同存储类型下已有同名文件：允许共存，仅做一次提示
+                        showToast('另一种存储类型下已存在同名文件，本次将作为独立文件保存', 'info');
+                    }
+                }
+                // 预检失败不阻塞上传，后端仍会兜底判断
+            } catch (e) {
+                // 预检网络异常：放行，交由上传流程处理
+            }
+
             const xhr = new XMLHttpRequest();
             xhr.open('POST', `${config.backendUrl}/upload`, true);
             xhr.setRequestHeader('StorageType', storageType);
             xhr.setRequestHeader('FileName', encodedFilename);
+            if (overwrite) {
+                xhr.setRequestHeader('Overwrite', 'true');
+            }
 
             // 初始化进度 UI
             progressWrap.classList.add('active');
@@ -565,6 +596,12 @@
                     progressDetail.textContent = `${formatSize(file.size)} · 100%`;
                     showToast('上传成功', 'success');
                     setTimeout(() => location.reload(), 900);
+                } else if (xhr.status === 409) {
+                    // 后端兜底：同类型同名文件冲突（未携带 Overwrite 头）
+                    progressBar.classList.add('error');
+                    progressStatus.textContent = '文件已存在';
+                    progressDetail.textContent = '请确认是否替换后重试';
+                    showToast('同名文件已存在，请确认是否替换', 'error');
                 } else {
                     progressBar.classList.add('error');
                     progressStatus.textContent = '上传失败';
@@ -595,7 +632,8 @@
         }
 
         // 删除文件：filenameB64 由后端 base64 编码后注入到 onclick，避免特殊字符转义问题
-        async function deleteFile(filenameB64) {
+        // storageType 用于区分 low / deep，保证不同存储类型的同名文件可以精确定位删除
+        async function deleteFile(filenameB64, storageType) {
             let filename = '';
             try {
                 // atob 解 base64，再用 TextDecoder 还原 UTF-8（兼容中文文件名）
@@ -608,13 +646,19 @@
                 return;
             }
 
-            if (!confirm(`确定要删除文件「${filename}」吗？此操作不可恢复。`)) {
+            if (storageType !== 'low' && storageType !== 'deep') {
+                showToast('未知存储类型', 'error');
+                return;
+            }
+
+            const typeLabel = storageType === 'deep' ? '深度存储' : '普通存储';
+            if (!confirm(`确定要删除${typeLabel}中的文件「${filename}」吗？此操作不可恢复。`)) {
                 return;
             }
 
             try {
                 const resp = await fetch(
-                    `${config.backendUrl}/delete/${encodeURIComponent(filename)}`,
+                    `${config.backendUrl}/delete/${storageType}/${encodeURIComponent(filename)}`,
                     { method: 'GET' }
                 );
                 if (resp.ok) {

@@ -97,12 +97,17 @@ namespace storage
             {
                 Download(req, arg);
             }
+            // 检查同名文件是否已存在：/exists?name=<base64>&type=<low|deep>
+            else if (path == "/exists")
+            {
+                Exists(req, arg);
+            }
             // 上传请求
             else if (path == "/upload")
             {
                 Upload(req, arg);
             }
-            // 删除请求 /delete/<filename>
+            // 删除请求 /delete/<type>/<filename>
             else if (path.find("/delete/") != std::string::npos)
             {
                 Delete(req, arg);
@@ -223,6 +228,26 @@ namespace storage
             mylog::GetLogger("asynclogger")->Debug("storage_path:%s", storage_path.c_str());
 #endif
 
+            // 检查同存储类型下是否已存在同名文件（通过 URL 精确判断）
+            // 若存在则必须携带 "Overwrite: true" 请求头才允许覆盖，
+            // 否则返回 409 Conflict 由前端弹窗让用户选择是否替换。
+            // 注意：不同存储类型下的同名文件拥有不同的 URL，因此天然可以共存，不会触发这里的冲突。
+            std::string check_url = Config::GetInstance()->GetDownloadPrefix()
+                                    + storage_type + "/" + filename;
+            StorageInfo existed_info;
+            bool same_type_exists = data_->GetOneByURL(check_url, &existed_info);
+            const char *overwrite_hdr = evhttp_find_header(req->input_headers, "Overwrite");
+            bool allow_overwrite = (overwrite_hdr != nullptr &&
+                                    std::string(overwrite_hdr) == "true");
+            if (same_type_exists && !allow_overwrite)
+            {
+                mylog::GetLogger("asynclogger")->Info(
+                    "Upload conflict: same-type file already exists, url:%s",
+                    check_url.c_str());
+                evhttp_send_reply(req, 409, "file already exists", NULL);
+                return;
+            }
+
             // 看路径里是low还是deep存储，是deep就压缩，是low就直接流式写入
             if (storage_path.find("low_storage") != std::string::npos)
             {
@@ -305,6 +330,74 @@ namespace storage
             mylog::GetLogger("asynclogger")->Info("upload finish:success");
         }
 
+        // 简单的 query string 解析：返回 key 对应的 value（已 UrlDecode）
+        // 找不到返回空串
+        static std::string GetQueryParam(const std::string &query, const std::string &key)
+        {
+            // query 形如 "name=xxx&type=low"
+            size_t pos = 0;
+            while (pos < query.size())
+            {
+                size_t eq = query.find('=', pos);
+                size_t amp = query.find('&', pos);
+                if (eq == std::string::npos) break;
+                std::string k = query.substr(pos, eq - pos);
+                size_t val_end = (amp == std::string::npos) ? query.size() : amp;
+                std::string v = query.substr(eq + 1, val_end - eq - 1);
+                if (k == key) return UrlDecode(v);
+                if (amp == std::string::npos) break;
+                pos = amp + 1;
+            }
+            return "";
+        }
+
+        // 检查同名文件在不同存储类型下的存在情况
+        // GET /exists?name=<base64-filename>&type=<low|deep>
+        // 响应 JSON: {"same_type_exists":bool,"other_type_exists":bool}
+        // 前端据此：same_type_exists=true -> 弹窗确认覆盖；other_type_exists=true -> 仅提示可共存
+        static void Exists(struct evhttp_request *req, void *arg)
+        {
+            const char *uri = evhttp_request_get_uri(req);
+            const char *q = evhttp_uri_get_query(evhttp_request_get_evhttp_uri(req));
+            std::string query = (q == nullptr) ? std::string() : std::string(q);
+
+            std::string name_b64 = GetQueryParam(query, "name");
+            std::string stype    = GetQueryParam(query, "type");
+            if (name_b64.empty() || (stype != "low" && stype != "deep"))
+            {
+                evhttp_send_reply(req, HTTP_BADREQUEST, "bad query", NULL);
+                return;
+            }
+
+            std::string filename;
+            try {
+                filename = base64_decode(name_b64);
+            } catch (...) {
+                evhttp_send_reply(req, HTTP_BADREQUEST, "bad filename", NULL);
+                return;
+            }
+
+            const std::string prefix = Config::GetInstance()->GetDownloadPrefix();
+            std::string same_url  = prefix + stype + "/" + filename;
+            std::string other_url = prefix + (stype == "low" ? "deep" : "low") + "/" + filename;
+
+            StorageInfo tmp;
+            bool same_exists  = data_->GetOneByURL(same_url,  &tmp);
+            bool other_exists = data_->GetOneByURL(other_url, &tmp);
+
+            std::string body = std::string("{\"same_type_exists\":")
+                             + (same_exists ? "true" : "false")
+                             + ",\"other_type_exists\":"
+                             + (other_exists ? "true" : "false")
+                             + "}";
+
+            struct evbuffer *out = evhttp_request_get_output_buffer(req);
+            evbuffer_add(out, body.data(), body.size());
+            evhttp_add_header(req->output_headers, "Content-Type", "application/json; charset=utf-8");
+            evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+            (void)uri;
+        }
+
         static std::string TimetoStr(time_t t)
         {
             std::string tmp = std::ctime(&t);
@@ -347,7 +440,7 @@ namespace storage
                    << "<div class='file-actions'>"
                    << "<button onclick=\"window.location='" << file.url_ << "'\">⬇️ 下载</button>"
                    << "<button class='btn-danger' onclick=\"deleteFile('"
-                   << filename_b64 << "')\">🗑️ 删除</button>"
+                   << filename_b64 << "','" << storage_type << "')\">🗑️ 删除</button>"
                    << "</div>"
                    << "</div>";
             }
@@ -420,7 +513,7 @@ namespace storage
             std::string path = evhttp_uri_get_path(evhttp_request_get_evhttp_uri(req));
             path = UrlDecode(path);
 
-            // 解析出文件名： /delete/xxx -> xxx
+            // 解析出 <type>/<filename>： /delete/low/xxx -> low/xxx
             const std::string prefix = "/delete/";
             auto pos = path.find(prefix);
             if (pos == std::string::npos || pos + prefix.size() >= path.size())
@@ -429,10 +522,18 @@ namespace storage
                 evhttp_send_reply(req, HTTP_BADREQUEST, "bad delete path", NULL);
                 return;
             }
-            std::string filename = path.substr(pos + prefix.size());
+            std::string type_and_name = path.substr(pos + prefix.size());
+            // 校验 type_and_name 至少含有 "/"
+            if (type_and_name.find('/') == std::string::npos)
+            {
+                mylog::GetLogger("asynclogger")->Error(
+                    "Delete: missing storage type segment, path:%s", path.c_str());
+                evhttp_send_reply(req, HTTP_BADREQUEST, "bad delete path", NULL);
+                return;
+            }
 
-            // 拼出 DataManager 中使用的 url_：download_prefix + filename
-            std::string url_key = Config::GetInstance()->GetDownloadPrefix() + filename;
+            // 拼出 DataManager 中使用的 url_：download_prefix + <type>/<filename>
+            std::string url_key = Config::GetInstance()->GetDownloadPrefix() + type_and_name;
 
             // 1. 先取出 StorageInfo 拿到磁盘存储路径
             StorageInfo info;
@@ -486,11 +587,15 @@ namespace storage
             {
                 mylog::GetLogger("asynclogger")->Info("uncompressing:%s", info.storage_path_.c_str());
                 FileUtil fu(info.storage_path_);
+                // 注意：解压出的临时文件放到 low_storage 目录下，文件名加上 ".deep_tmp_" 前缀，
+                // 避免与用户在 low 存储中已存在的同名文件冲突（否则会覆盖用户真实数据）。
+                std::string base_name(download_path.begin() + download_path.find_last_of('/') + 1,
+                                      download_path.end());
                 download_path = Config::GetInstance()->GetLowStorageDir() +
-                                std::string(download_path.begin() + download_path.find_last_of('/') + 1, download_path.end());
+                                std::string(".deep_tmp_") + base_name;
                 FileUtil dirCreate(Config::GetInstance()->GetLowStorageDir());
                 dirCreate.CreateDirectory();
-                fu.UnCompress(download_path); // 将文件解压到low_storage下
+                fu.UnCompress(download_path); // 将文件解压到low_storage下（临时文件）
             }
             mylog::GetLogger("asynclogger")->Info("request download_path:%s", download_path.c_str());
 

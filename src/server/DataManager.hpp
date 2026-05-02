@@ -12,6 +12,15 @@ namespace storage
         std::string storage_path_;  // 文件存储路径
         std::string url_;           // 请求URL中的资源路径
 
+        // 根据存储路径推导存储类型标签（"low" / "deep"）
+        static std::string StorageTypeFromPath(const std::string &storage_path)
+        {
+            // 约定：low_storage 目录下为普通存储，否则为深度存储
+            if (storage_path.find("low_storage") != std::string::npos)
+                return "low";
+            return "deep";
+        }
+
         bool NewStorageInfo(const std::string &storage_path)
         {
             // 初始化备份文件的信息
@@ -27,9 +36,11 @@ namespace storage
             fsize_ = f.FileSize();
             storage_path_ = storage_path;
             // URL实际就是用户下载文件请求的路径
-            // 下载路径前缀+文件名
+            // 下载路径前缀 + 存储类型 + "/" + 文件名
+            // 加入存储类型，使同名但不同存储类型的文件拥有不同的 URL，避免相互覆盖产生孤儿文件
             storage::Config *config = storage::Config::GetInstance();
-            url_ = config->GetDownloadPrefix() + f.FileName();
+            std::string stype = StorageTypeFromPath(storage_path);
+            url_ = config->GetDownloadPrefix() + stype + "/" + f.FileName();
             mylog::GetLogger("asynclogger")->Info("download_url:%s,mtime_:%s,atime_:%s,fsize_:%d", url_.c_str(),ctime(&mtime_),ctime(&atime_),fsize_);
             mylog::GetLogger("asynclogger")->Info("NewStorageInfo end");
             return true;
@@ -85,6 +96,25 @@ namespace storage
                 info.mtime_ = root[i]["mtime_"].asInt();
                 info.storage_path_ = root[i]["storage_path_"].asString();
                 info.url_ = root[i]["url_"].asString();
+
+                // 兼容旧数据：旧版本 url_ 不含存储类型（形如 /download/xxx），
+                // 这里根据 storage_path_ 推导类型并补成 /download/<type>/xxx，
+                // 使得同名但不同类型的历史文件不再被同一 key 覆盖成孤儿。
+                const std::string prefix = storage::Config::GetInstance()->GetDownloadPrefix();
+                std::string after_prefix = info.url_;
+                if (info.url_.compare(0, prefix.size(), prefix) == 0)
+                    after_prefix = info.url_.substr(prefix.size());
+                // 若剥掉前缀后，第一段不是 "low" 或 "deep"，则认定为旧格式
+                bool has_type_seg = (after_prefix.compare(0, 4, "low/") == 0) ||
+                                    (after_prefix.compare(0, 5, "deep/") == 0);
+                if (!has_type_seg)
+                {
+                    std::string stype = StorageInfo::StorageTypeFromPath(info.storage_path_);
+                    info.url_ = prefix + stype + "/" + after_prefix;
+                    mylog::GetLogger("asynclogger")->Info(
+                        "InitLoad: migrate legacy url -> %s", info.url_.c_str());
+                }
+
                 Insert(info);
             }
             return true;
