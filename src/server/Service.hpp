@@ -689,24 +689,37 @@ namespace storage
             mylog::GetLogger("asynclogger")->Info("request download_path:%s", download_path.c_str());
 
             FileUtil fu(download_path);
-            if (fu.Exists() == false && info.storage_path_.find("deep_storage") != std::string::npos)
-            {
-                // 如果是压缩文件，且解压失败，是服务端的错误
-                mylog::GetLogger("asynclogger")->Error("evhttp_send_reply: 500 - UnCompress failed");
-                evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
-                return;
-            }
-            else if (fu.Exists() == false && info.storage_path_.find("low_storage") == std::string::npos)
-            {
-                // 如果是普通文件，且文件不存在，是客户端的错误
-                mylog::GetLogger("asynclogger")->Error("evhttp_send_reply: 400 - bad request,file not exists");
-                evhttp_send_reply(req, HTTP_BADREQUEST, "file not exists", NULL);
-                return;
-            }
             if (fu.Exists() == false)
             {
-                mylog::GetLogger("asynclogger")->Error("%s not exists", download_path.c_str());
-                evhttp_send_reply(req, HTTP_NOTFOUND, "file not exists", NULL);
+                const std::string &deep_dir = Config::GetInstance()->GetDeepStorageDir();
+                const std::string &low_dir  = Config::GetInstance()->GetLowStorageDir();
+                const bool is_deep = info.storage_path_.rfind(deep_dir, 0) == 0;
+                const bool is_low  = info.storage_path_.rfind(low_dir,  0) == 0;
+
+                if (is_deep)
+                {
+                    // 深度存储：原始压缩包应当存在，解压后的临时文件不存在意味着服务端解压失败
+                    mylog::GetLogger("asynclogger")->Error(
+                        "evhttp_send_reply: 500 - UnCompress failed, path:%s",
+                        download_path.c_str());
+                    evhttp_send_reply(req, HTTP_INTERNAL, NULL, NULL);
+                }
+                else if (is_low)
+                {
+                    // 浅度存储：原文件本应直接可读，文件丢失属于服务端数据问题
+                    mylog::GetLogger("asynclogger")->Error(
+                        "evhttp_send_reply: 404 - low storage file missing, path:%s",
+                        download_path.c_str());
+                    evhttp_send_reply(req, HTTP_NOTFOUND, "file not exists", NULL);
+                }
+                else
+                {
+                    // 元数据中的路径既不在深存也不在浅存目录下：要么是非法 URL，要么是脏数据
+                    mylog::GetLogger("asynclogger")->Error(
+                        "evhttp_send_reply: 400 - bad request, unknown storage path:%s",
+                        info.storage_path_.c_str());
+                    evhttp_send_reply(req, HTTP_BADREQUEST, "file not exists", NULL);
+                }
                 return;
             }
 
