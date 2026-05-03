@@ -7,6 +7,7 @@ gdb_test
 client_test
 backup_server
 functional_test
+performance_test
 a.out
 *.out
 
