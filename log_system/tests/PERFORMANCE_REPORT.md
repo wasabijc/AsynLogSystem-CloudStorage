@@ -169,25 +169,5 @@ B4/B5/B3 的 max 高达数百毫秒甚至 20 秒级，全部源于：
 | ⭐ | [`LogMessage::format`](../logs_code/Message.hpp:25) 改用 thread_local `fmt::memory_buffer` | p50 可能降到 ~0.8 μs | 需引入 fmt 库 |
 | ⭐ | 改进 [`MeasureDrain`](performance_test.cpp:131) 采样精度到 1 ms | 报告更精确 | 无 |
 
----
-
-## 8. 如何复现
-
-```bash
-cd log_system/tests
-
-# 快速验证（~20s）
-make perf-quick
-
-# 正式基准（~60-90s）
-make perf-run
-
-# 清理
-make clean
-```
-
-性能测试编译参数：`-O3 -DNDEBUG -pthread`，见 [Makefile](Makefile)。
-
----
 
 *报告生成日期：2026-05-03*

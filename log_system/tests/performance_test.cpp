@@ -3,37 +3,38 @@
  * @brief 异步日志子系统 —— 性能基准测试
  *
  * 目标
- *   在固定机器上量化 mylog 在不同场景下的吞吐与延迟，得到一份
- *   可用于对比 / 回归 / 调优的基准报告。
+ *   在固定机器上量化 mylog 在 RollFileFlush + SAFE 模式下，
+ *   不同线程数 × 不同 payload 大小的吞吐与延迟。
  *
- * 测试矩阵（6 组 benchmark）
- *   B1  Stdout   / SAFE   / 1T / 64B    —— 纯内部开销上限
- *   B2  File     / SAFE   / 1T / 64B    —— 单线程短日志磁盘吞吐
- *   B3  File     / SAFE   / 1T / 512B   —— 单线程长日志对比
- *   B4  File     / SAFE   / 8T / 64B    —— 多线程并发吞吐
- *   B5  File     / UNSAFE / 8T / 64B    —— UNSAFE 模式对比
- *   B6  Roll     / SAFE   / 4T / 128B   —— 滚动日志开销
+ * 测试矩阵（8 组 benchmark，全部 RollFileFlush / SAFE）
+ *   B1  1T  /  64B   —— 单线程小包基线
+ *   B2  1T  / 256B   —— 单线程中包
+ *   B3  1T  / 1024B  —— 单线程大包（看带宽上限）
+ *   B4  4T  /  64B   —— 中并发小包
+ *   B5  8T  /  64B   —— 高并发小包（锁争用压力）
+ *   B6  16T /  64B   —— 超高并发小包
+ *   B7  8T  / 256B   —— 高并发中包
+ *   B8  8T  / 1024B  —— 高并发大包
  *
  * 度量指标
- *   - total_ns   : 所有生产者调用 lg->Info 的总耗时（墙钟时间）
- *   - ops        : 实际写入日志条数
- *   - throughput : ops / total_seconds 条/秒
- *   - bandwidth  : (ops * payload_bytes) / total / 1024^2  MB/s
- *   - p50 / p90 / p99 / max : 单次 Info 调用延迟分位数（ns）
- *   - drain_ms   : 生产结束到异步消费者把生产者缓冲区耗尽的等待时间
+ *   - ops        : 总写入日志条数
+ *   - ops/s      : 吞吐（条/秒）
+ *   - MB/s       : 字节吞吐 = ops × payload / 总时间
+ *   - p50/p90/p99/max : 单次 lg->Info 调用延迟分位数（μs）
+ *   - drain_ms   : 生产结束后等消费者把缓冲区排空的近似耗时
  *
  * 实现要点
- *   - B1 将 stdout 重定向到 /dev/null，把终端输出耗时排除；
- *   - 每个 bench 使用独立 logger 名 + 独立日志文件，测试后删除；
- *   - warmup 1 万条，丢弃其延迟样本；
- *   - 为控制测试时间，多数 bench 单线程 50 万条，多线程每线程 10 万条；
- *   - 延迟样本以 vector<uint64_t> 存储，数量受控在百万级以内；
- *   - drain 通过轮询"再写一条 -> 等文件大小增加"近似测量；
- *     这在异步场景下只是近似，但足以反映队列压力。
+ *   - 每组 bench 独立 logger 名 + 独立滚动文件前缀，互不干扰；
+ *   - warmup 1 万条，不计入统计；
+ *   - 单线程 bench 跑 500k 条，多线程每线程跑 100k 条；
+ *     --quick 模式分别缩减到 100k / 25k；
+ *   - Roll 阈值统一设为 8MB，避免文件数过多；
+ *   - Summary 横向对比线程维度加速比与 payload 维度带宽变化。
  *
  * 编译运行
  *   cd log_system/tests
  *   make perf && ./performance_test
+ *   make perf-quick               # 快速模式
  */
 
 #include "../logs_code/MyLog.hpp"
@@ -45,7 +46,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -76,22 +76,6 @@ static int64_t FileSizeOrZero(const std::string &path) {
     struct stat st;
     if (::stat(path.c_str(), &st) != 0) return 0;
     return st.st_size;
-}
-
-// 将 FILE* stdout 重定向到 /dev/null，返回原 fd (dup)，便于稍后还原
-static int RedirectStdoutToNull() {
-    ::fflush(stdout);
-    int saved = ::dup(fileno(stdout));
-    int devnull = ::open("/dev/null", O_WRONLY);
-    ::dup2(devnull, fileno(stdout));
-    ::close(devnull);
-    return saved;
-}
-
-static void RestoreStdout(int saved_fd) {
-    ::fflush(stdout);
-    ::dup2(saved_fd, fileno(stdout));
-    ::close(saved_fd);
 }
 
 // =====================================================================
@@ -336,101 +320,55 @@ int main(int argc, char **argv) {
 
     std::cout << "==========================================================\n";
     std::cout << "  mylog Performance Benchmark  (" << (quick ? "quick" : "full")
-              << ")\n";
+              << ")  sink=Roll  mode=SAFE\n";
     std::cout << "  thread_pool=" << g_conf_data->thread_count
               << "  buffer_size=" << g_conf_data->buffer_size
               << "  flush_mode=" << g_conf_data->flush_log << "\n";
     std::cout << "==========================================================\n";
 
-    // 根据模式调整 ops 规模
+    // ops 规模
     size_t n1 = quick ? 100000 : 500000;   // 单线程
     size_t n2 = quick ? 25000  : 100000;   // 多线程每线程
 
+    // Roll 阈值统一 8MB，避免文件数过多
+    const size_t kRollSize = 8 * 1024 * 1024;
+
     std::vector<BenchResult> results;
 
-    // ---------- B1 Stdout / SAFE / 1T / 64B ----------
-    {
-        // 把 stdout 重定向到 /dev/null，防止洗屏影响耗时
-        int saved = RedirectStdoutToNull();
+    // 辅助 lambda：构造一组 Roll/SAFE 的 BenchConfig 并运行
+    auto MakeRollConfig = [&](const std::string &bname,
+                               const std::string &lname,
+                               int threads,
+                               size_t payload_bytes,
+                               size_t ops_per_thread) -> BenchConfig {
         BenchConfig c;
-        c.name = "B1 Stdout/1T/64B";
-        c.logger_name = "perf_b1";
-        c.sink = "Stdout";
-        c.file_path = "";  // stdout 无文件
-        c.async_type = mylog::AsyncType::ASYNC_SAFE;
-        c.threads = 1;
-        c.ops_per_thread = n1;
-        c.payload_bytes = 64;
-        auto r = RunBench(c);
-        RestoreStdout(saved);
-        results.push_back(r);
-    }
+        c.name           = bname;
+        c.logger_name    = lname;
+        c.sink           = "Roll";
+        c.file_path      = kDir + lname + "_";
+        c.async_type     = mylog::AsyncType::ASYNC_SAFE;
+        c.threads        = threads;
+        c.ops_per_thread = ops_per_thread;
+        c.payload_bytes  = payload_bytes;
+        return c;
+    };
 
-    // ---------- B2 File / SAFE / 1T / 64B ----------
-    {
-        BenchConfig c;
-        c.name = "B2 File/1T/64B";
-        c.logger_name = "perf_b2";
-        c.sink = "File";
-        c.file_path = kDir + "b2.log";
-        c.threads = 1;
-        c.ops_per_thread = n1;
-        c.payload_bytes = 64;
-        results.push_back(RunBench(c));
-    }
-
-    // ---------- B3 File / SAFE / 1T / 512B ----------
-    {
-        BenchConfig c;
-        c.name = "B3 File/1T/512B";
-        c.logger_name = "perf_b3";
-        c.sink = "File";
-        c.file_path = kDir + "b3.log";
-        c.threads = 1;
-        c.ops_per_thread = n1;
-        c.payload_bytes = 512;
-        results.push_back(RunBench(c));
-    }
-
-    // ---------- B4 File / SAFE / 8T / 64B ----------
-    {
-        BenchConfig c;
-        c.name = "B4 File/8T/64B";
-        c.logger_name = "perf_b4";
-        c.sink = "File";
-        c.file_path = kDir + "b4.log";
-        c.threads = 8;
-        c.ops_per_thread = n2;
-        c.payload_bytes = 64;
-        results.push_back(RunBench(c));
-    }
-
-    // ---------- B5 File / UNSAFE / 8T / 64B ----------
-    {
-        BenchConfig c;
-        c.name = "B5 File/8T/64B/UNSAFE";
-        c.logger_name = "perf_b5";
-        c.sink = "File";
-        c.file_path = kDir + "b5.log";
-        c.async_type = mylog::AsyncType::ASYNC_UNSAFE;
-        c.threads = 8;
-        c.ops_per_thread = n2;
-        c.payload_bytes = 64;
-        results.push_back(RunBench(c));
-    }
-
-    // ---------- B6 Roll / SAFE / 4T / 128B ----------
-    {
-        BenchConfig c;
-        c.name = "B6 Roll/4T/128B";
-        c.logger_name = "perf_b6";
-        c.sink = "Roll";
-        c.file_path = kDir + "b6_roll_";
-        c.threads = 4;
-        c.ops_per_thread = n2;
-        c.payload_bytes = 128;
-        results.push_back(RunBench(c));
-    }
+    // ---------- B1  1T / 64B  —— 单线程小包基线 ----------
+    results.push_back(RunBench(MakeRollConfig("B1 Roll/1T/64B",   "pb1",  1,  64,   n1)));
+    // ---------- B2  1T / 256B ----------
+    results.push_back(RunBench(MakeRollConfig("B2 Roll/1T/256B",  "pb2",  1,  256,  n1)));
+    // ---------- B3  1T / 1024B —— 单线程大包，看带宽上限 ----------
+    results.push_back(RunBench(MakeRollConfig("B3 Roll/1T/1024B", "pb3",  1,  1024, n1)));
+    // ---------- B4  4T / 64B ----------
+    results.push_back(RunBench(MakeRollConfig("B4 Roll/4T/64B",   "pb4",  4,  64,   n2)));
+    // ---------- B5  8T / 64B  —— 高并发小包，锁争用压力 ----------
+    results.push_back(RunBench(MakeRollConfig("B5 Roll/8T/64B",   "pb5",  8,  64,   n2)));
+    // ---------- B6  16T / 64B —— 超高并发小包 ----------
+    results.push_back(RunBench(MakeRollConfig("B6 Roll/16T/64B",  "pb6",  16, 64,   n2)));
+    // ---------- B7  8T / 256B ----------
+    results.push_back(RunBench(MakeRollConfig("B7 Roll/8T/256B",  "pb7",  8,  256,  n2)));
+    // ---------- B8  8T / 1024B —— 高并发大包 ----------
+    results.push_back(RunBench(MakeRollConfig("B8 Roll/8T/1024B", "pb8",  8,  1024, n2)));
 
     // =============== 打印报告 ===============
     std::cout << "\n";
@@ -439,40 +377,68 @@ int main(int argc, char **argv) {
     for (auto &r : results) PrintRow(idx++, r);
     std::cout << "\n";
 
-    // 关键对比摘要
-    auto Find = [&](const std::string &name) -> BenchResult * {
+    // =============== Summary ===============
+    auto Find = [&](const std::string &prefix) -> BenchResult * {
         for (auto &r : results)
-            if (r.name.find(name) != std::string::npos) return &r;
+            if (r.name.find(prefix) != std::string::npos) return &r;
         return nullptr;
     };
-    auto Ratio = [](double a, double b) {
+    auto Ratio = [](double a, double b) -> double {
         return b > 0 ? a / b : 0.0;
     };
 
-    std::cout << "---- Summary ----\n";
-    auto *b1 = Find("B1 Stdout"), *b2 = Find("B2 File"), *b3 = Find("B3 File"),
-         *b4 = Find("B4 File"), *b5 = Find("B5"),        *b6 = Find("B6 Roll");
+    auto *b1 = Find("B1"), *b2 = Find("B2"), *b3 = Find("B3");
+    auto *b4 = Find("B4"), *b5 = Find("B5"), *b6 = Find("B6");
+    auto *b7 = Find("B7"), *b8 = Find("B8");
 
+    std::cout << "---- Summary (Roll / SAFE) ----\n";
+
+    // 线程维度（固定 64B）：1T → 4T → 8T → 16T
+    if (b1 && b4)
+        std::cout << "  Thread scale-up  1T->4T  (64B): "
+                  << std::fixed << std::setprecision(2)
+                  << Ratio(b4->throughput, b1->throughput) << "x  ops/s "
+                  << (uint64_t)b4->throughput << "\n";
+    if (b1 && b5)
+        std::cout << "  Thread scale-up  1T->8T  (64B): "
+                  << std::fixed << std::setprecision(2)
+                  << Ratio(b5->throughput, b1->throughput) << "x  ops/s "
+                  << (uint64_t)b5->throughput << "\n";
+    if (b1 && b6)
+        std::cout << "  Thread scale-up  1T->16T (64B): "
+                  << std::fixed << std::setprecision(2)
+                  << Ratio(b6->throughput, b1->throughput) << "x  ops/s "
+                  << (uint64_t)b6->throughput << "\n";
+
+    // payload 维度（固定 1T）：64B → 256B → 1024B（关注 MB/s）
     if (b1 && b2)
-        std::cout << "  Stdout vs File (1T/64B) throughput: "
+        std::cout << "  Payload 64B->256B  (1T) throughput ratio: "
                   << std::fixed << std::setprecision(2)
-                  << Ratio(b1->throughput, b2->throughput) << "x\n";
-    if (b2 && b3)
-        std::cout << "  64B vs 512B payload (File/1T) throughput drop: "
+                  << Ratio(b2->throughput, b1->throughput) << "x"
+                  << "  bandwidth " << b2->bandwidth_mb << " MB/s\n";
+    if (b1 && b3)
+        std::cout << "  Payload 64B->1024B (1T) throughput ratio: "
                   << std::fixed << std::setprecision(2)
-                  << Ratio(b2->throughput, b3->throughput) << "x\n";
-    if (b2 && b4)
-        std::cout << "  MultiThread speedup (8T vs 1T, File/64B): "
+                  << Ratio(b3->throughput, b1->throughput) << "x"
+                  << "  bandwidth " << b3->bandwidth_mb << " MB/s\n";
+
+    // payload 维度（固定 8T）：64B → 256B → 1024B
+    if (b5 && b7)
+        std::cout << "  Payload 64B->256B  (8T) throughput ratio: "
                   << std::fixed << std::setprecision(2)
-                  << Ratio(b4->throughput, b2->throughput) << "x\n";
-    if (b4 && b5)
-        std::cout << "  UNSAFE vs SAFE (8T/64B): "
+                  << Ratio(b7->throughput, b5->throughput) << "x"
+                  << "  bandwidth " << b7->bandwidth_mb << " MB/s\n";
+    if (b5 && b8)
+        std::cout << "  Payload 64B->1024B (8T) throughput ratio: "
                   << std::fixed << std::setprecision(2)
-                  << Ratio(b5->throughput, b4->throughput) << "x\n";
-    if (b2 && b6)
-        std::cout << "  Roll vs File extra cost (throughput ratio): "
-                  << std::fixed << std::setprecision(2)
-                  << Ratio(b6->throughput, b2->throughput) << "x\n";
+                  << Ratio(b8->throughput, b5->throughput) << "x"
+                  << "  bandwidth " << b8->bandwidth_mb << " MB/s\n";
+
+    // p99 尾延迟对比（锁争用关键指标）
+    if (b1 && b5 && b6)
+        std::cout << "  p99 latency:  1T=" << b1->p99_ns / 1000.0
+                  << "us  8T=" << b5->p99_ns / 1000.0
+                  << "us  16T=" << b6->p99_ns / 1000.0 << "us\n";
 
     std::cout << std::endl;
 
