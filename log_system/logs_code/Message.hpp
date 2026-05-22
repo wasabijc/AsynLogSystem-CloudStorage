@@ -31,7 +31,7 @@ namespace mylog
       char buf[128];
       strftime(buf, sizeof(buf), "%H:%M:%S", &t);
       std::string tmp1 = '[' + std::string(buf) + "][";
-      std::string tmp2 = '[' + std::string(LogLevel::ToString(level_)) + "][" + name_ + "][" + file_name_ + ":" + std::to_string(line_) + "]\t" + payload_ + "\n";
+      std::string tmp2 = '][' + std::string(LogLevel::ToString(level_)) + "][" + name_ + "][" + file_name_ + ":" + std::to_string(line_) + "]\t" + payload_ + "\n";
       ret << tmp1 << tid_ << tmp2;
       return ret.str();
     }
